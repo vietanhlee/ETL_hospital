@@ -116,7 +116,7 @@ services:
       - postgres # Airflow Webserver cần Postgres để đọc/ghi metadata
     environment:
       - AIRFLOW__DATABASE__SQL_ALCHEMY_CONN=postgresql+psycopg2://airflow:airflow@postgres/airflow # Chuỗi kết nối tới Postgres nội bộ
-      - AIRFLOW__CORE__EXECUTOR=LocalExecutor# Sử dụng LocalExecutor cho phép chạy nhiều Task song song trong cùng 1 môi trường (container) thay vì chạy tuần tự như SequentialExecutor
+      - AIRFLOW__CORE__EXECUTOR=LocalExecutor # Sử dụng LocalExecutor cho phép chạy nhiều Task song song trong cùng 1 môi trường (container) thay vì chạy tuần tự như SequentialExecutor
       - AIRFLOW__CORE__LOAD_EXAMPLES=False # Tắt các DAG mẫu mặc định của Airflow để giao diện gọn gàng hơn
       - AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION=True # Đặt False để các DAG mới xuất hiện sẽ tự động được kích hoạt (Unpause)
       - AIRFLOW__WEBSERVER__SECRET_KEY=hospital_etl_secret_key # Khóa bảo mật của ứng dụng web
@@ -129,7 +129,7 @@ services:
     networks:
       - etl_network
     # Lệnh khởi động: Tự động tạo/nâng cấp các bảng metadata của Airflow, tạo tài khoản admin và sau đó bật webserver
-    command: bash -c "airflow db upgrade && airflow users create --username admin --password admin --firstname Admin --lastname Admin --role Admin --email admin@example.com && airflow webserver"
+    command: bash -c "airflow db upgrade && (airflow users create --username admin --password admin --firstname Admin --lastname Admin --role Admin --email admin@example.com || true) && airflow webserver"
 
   airflow-scheduler:
     build:
