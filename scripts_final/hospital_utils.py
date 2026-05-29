@@ -1,6 +1,8 @@
 # -*- coding: utf-8 -*-
+import base64
+import urllib.request
 from pyspark.sql import SparkSession
-
+import os
 
 def create_spark(app_name: str):
     """

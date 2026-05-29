@@ -9,7 +9,6 @@ ClickHouse Cloud Data Warehouse thông qua JDBC.
 import os
 import sys
 import urllib.request
-import base64
 from hospital_utils import create_spark, read_parquet, execute_ch_sql_http, load_to_clickhouse
 
 
