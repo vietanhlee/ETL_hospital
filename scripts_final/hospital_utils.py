@@ -18,38 +18,6 @@ def create_spark(app_name: str):
         .config("spark.sql.legacy.timeParserPolicy", "LEGACY") \
         .getOrCreate()
 
-
-def read_csv(spark, path: str):
-    """
-    Đọc dữ liệu từ file CSV trên HDFS vào Spark DataFrame.
-    
-    Args:
-        spark (SparkSession): Đối tượng SparkSession hiện tại.
-        path (str): Đường dẫn tới thư mục/file CSV trên HDFS.
-        
-    Returns:
-        DataFrame: Dữ liệu DataFrame đã được đọc lên (tất cả các cột đều là String).
-    """
-    return spark.read.option("header", True) \
-        .option("inferSchema", False) \
-        .option("encoding", "UTF-8") \
-        .csv(path)
-
-
-def write_csv(df, path: str):
-    """
-    Ghi dữ liệu Spark DataFrame ra HDFS dưới dạng 1 file CSV.
-    
-    Args:
-        df (DataFrame): Dữ liệu cần ghi.
-        path (str): Đường dẫn đích trên HDFS.
-    """
-    df.coalesce(1).write.mode("overwrite") \
-        .option("header", True) \
-        .option("encoding", "UTF-8") \
-        .csv(path)
-
-
 def read_parquet(spark, path: str):
     """
     Đọc dữ liệu từ file Parquet trên HDFS vào Spark DataFrame.
@@ -111,48 +79,83 @@ def read_mysql_table(spark, jdbc_url: str, table_name: str, user: str, password:
             .load())
 
 
-def write_mysql_table(df, jdbc_url: str, table_name: str, user: str, password: str, mode: str = "append"):
+def get_jdbc_url(db_name=""):
     """
-    Ghi Spark DataFrame xuống bảng MySQL qua JDBC.
+    Tạo chuỗi kết nối JDBC tới ClickHouse Cloud.
     
     Args:
-        df (DataFrame): Dữ liệu cần ghi.
-        jdbc_url (str): Chuỗi kết nối JDBC.
-        table_name (str): Tên bảng MySQL đích.
-        user (str): Tên đăng nhập DB.
-        password (str): Mật khẩu DB.
-        mode (str, optional): Chế độ ghi ("append", "overwrite"). Mặc định là "append".
+        db_name (str): Tên database. Mặc định là chuỗi rỗng.
+        
+    Returns:
+        str: Chuỗi kết nối JDBC hoàn chỉnh.
     """
-    (df.write.format("jdbc")
-       .option("url", jdbc_url)
-       .option("dbtable", table_name)
-       .option("user", user)
-       .option("password", password)
-       .option("driver", "com.mysql.cj.jdbc.Driver")
-       .option("batchsize", "5000")
-       .mode(mode)
-       .save())
+    host = os.getenv('CLICKHOUSE_HOST', 'qlfb8ypu5w.ap-northeast-1.aws.clickhouse.cloud')
+    port = os.getenv('CLICKHOUSE_PORT', '8443')
+    secure = os.getenv('CLICKHOUSE_SECURE', 'True').lower() in ('true', '1', 't')
+    
+    url = f"jdbc:clickhouse://{host}:{port}/{db_name}"
+    if secure:
+        url += "?ssl=true"
+    return url
 
 
-def execute_mysql_sql(spark, jdbc_url: str, user: str, password: str, sql_text: str):
+def execute_ch_sql_http(host, port, user, password, db_name, sql_text, secure):
     """
-    Thực thi mã lệnh SQL thuần (DDL/DML) trên MySQL thông qua Spark JVM (Py4J).
+    Thực thi mã SQL (DDL/DML) trên ClickHouse thông qua HTTP/HTTPS API.
+    Sử dụng để tạo Database và tạo Bảng (CREATE TABLE) vì JDBC của Spark 
+    không hỗ trợ tốt các lệnh DDL phức tạp của ClickHouse.
     
     Args:
-        spark (SparkSession): Đối tượng SparkSession.
-        jdbc_url (str): Chuỗi kết nối JDBC.
-        user (str): Tên đăng nhập DB.
-        password (str): Mật khẩu DB.
-        sql_text (str): Mã SQL (có thể gồm nhiều câu lệnh phân tách bởi dấu ;).
+        host, port, user, password (str): Thông tin kết nối ClickHouse.
+        db_name (str): Tên database.
+        sql_text (str): Mã SQL cần thực thi.
+        secure (bool): Dùng HTTPS (True) hay HTTP (False).
     """
-    jvm = spark.sparkContext._gateway.jvm
-    conn = jvm.java.sql.DriverManager.getConnection(jdbc_url, user, password)
-    stmt = conn.createStatement()
-    try:
-        for sql in sql_text.split(";"):
-            sql = sql.strip()
-            if sql:
-                stmt.execute(sql)
-    finally:
-        stmt.close()
-        conn.close()
+    protocol = "https" if secure else "http"
+    url = f"{protocol}://{host}:{port}/"
+    if db_name:
+        url += f"?database={db_name}"
+        
+    auth_str = f"{user}:{password}"
+    b64_auth = base64.b64encode(auth_str.encode('ascii')).decode('ascii')
+    
+    for sql in sql_text.split(";"):
+        sql = sql.strip()
+        if sql:
+            req = urllib.request.Request(url, data=sql.encode('utf-8'))
+            req.add_header("Authorization", f"Basic {b64_auth}")
+            try:
+                with urllib.request.urlopen(req) as response:
+                    response.read()
+            except Exception as e:
+                print(f"Error executing SQL: {sql}")
+                raise e
+
+
+def load_to_clickhouse(df, table_name, db_name='hospital_dw'):
+    """
+    Đẩy Spark DataFrame lên bảng ClickHouse qua giao thức JDBC.
+    Dữ liệu được đẩy theo từng lô (batchsize=10000) để tối ưu hiệu suất.
+    
+    Args:
+        df (DataFrame): Dữ liệu cần nạp.
+        table_name (str): Tên bảng đích trên ClickHouse.
+        db_name (str): Tên database đích.
+    """
+    jdbc_url = get_jdbc_url(db_name)
+    user = os.getenv('CLICKHOUSE_USER', 'default')
+    password = os.getenv('CLICKHOUSE_PASSWORD', 'N7f8bLl.qrbON')
+    
+    print(f"Inserting rows into {db_name}.{table_name} via JDBC...")
+    df.write \
+        .format("jdbc") \
+        .option("url", jdbc_url) \
+        .option("dbtable", table_name) \
+        .option("user", user) \
+        .option("password", password) \
+        .option("driver", "ru.yandex.clickhouse.ClickHouseDriver") \
+        .option("batchsize", "10000") \
+        .mode("append") \
+        .save()
+    print(f"Insert into {table_name} completed.")
+
