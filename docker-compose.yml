@@ -155,6 +155,21 @@ services:
     # Lệnh khởi động: Đảm bảo metadata đã cập nhật (phòng khi scheduler chạy trước webserver 1 chút) rồi khởi động tiến trình lập lịch (scheduler)
     command: bash -c "airflow db upgrade && airflow scheduler"
 
+  # ==========================================
+  # MLOPS (MLFLOW TRACKING SERVER)
+  # ==========================================
+  mlflow-server:
+    image: python:3.9-slim
+    container_name: mlflow-server
+    restart: always
+    ports:
+      - "5000:5000" # Mở port 5000 cho giao diện Web UI của MLflow
+    volumes:
+      - ./mlruns:/mlruns # Thư mục lưu trữ model và database sqlite của MLflow
+    command: bash -c "pip install mlflow && mlflow server --backend-store-uri sqlite:////mlruns/mlflow.db --default-artifact-root /mlruns --host 0.0.0.0 --port 5000"
+    networks:
+      - etl_network
+
 # ==========================================
 # KHAI BÁO VOLUMES (LƯU TRỮ VĨNH VIỄN - PERSISTENCE)
 # ==========================================

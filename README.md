@@ -16,6 +16,7 @@ Hospital_ETL/
 │   ├── hospital_dimension_job.py   # Job 3: Tạo Dimension Tables (Gold layer).
 │   ├── hospital_fact_job.py        # Job 4: Tạo Fact Tables (Gold layer) và xử lý Data Quality.
 │   ├── load_hdfs_to_clickhouse_dw.py # Job 5: Đẩy dữ liệu từ Gold Layer lên ClickHouse DW.
+│   ├── train_revenue_forecast.py   # Job 6 (MLOps): Huấn luyện mô hình ARIMA dự báo doanh thu.
 │   └── hospital_utils.py           # Các hàm tiện ích dùng chung (đọc/ghi parquet, tạo spark session).
 ├── shell/                          # Bash scripts được gọi bởi Airflow để submit các Job Spark.
 │   └── hospital_etl_airflow.sh
@@ -58,8 +59,9 @@ Dữ liệu mẫu từ thư mục `datasource/` (các file `.sql`) sẽ được
    - **Password:** `admin`
 3. Tại giao diện chính, bật On cho DAG có tên `hospital_etl_dag`.
 4. Bấm nút Play (Trigger DAG) để kích hoạt luồng chạy. Tiến trình sẽ lần lượt đi qua các task:
-   `extract_mysql_to_hdfs` ➔ `build_staging` ➔ `build_dimensions` ➔ `build_facts` ➔ `load_hdfs_to_clickhouse_dw`.
-5. *Quản lý file trên HDFS:* Xem trực tiếp dữ liệu thô và sạch tại HDFS Web UI: **http://localhost:9870**.
+   `extract_mysql_to_hdfs` ➔ `build_staging` ➔ `build_dimensions` ➔ `build_facts` ➔ `load_hdfs_to_clickhouse_dw` ➔ `train_ml_revenue_forecast`.
+5. *Quản lý Model qua MLflow:* Sau khi Job cuối cùng chạy xong, truy cập **http://localhost:5000** để xem metrics (MAE, RMSE) và Schema mô hình dự báo.
+6. *Quản lý file trên HDFS:* Xem trực tiếp dữ liệu thô và sạch tại HDFS Web UI: **http://localhost:9870**.
 
 ---
 

@@ -70,8 +70,14 @@ with DAG(
         """,
     )
 
+    # Task MLOps: Dự báo doanh thu
+    train_ml_revenue = BashOperator(
+        task_id="train_ml_revenue_forecast",
+        bash_command="python /opt/spark-apps/hospital_etl/scripts_final/train_revenue_forecast.py",
+    )
+
     # ---------------------------------------------------------
     # Xác định thứ tự chạy các task (Dependencies)
     # Data Lake Medallion Architecture: Bronze -> Silver -> Gold -> Data Warehouse
     # ---------------------------------------------------------
-    extract_mysql_to_hdfs >> build_staging >> build_dimensions >> build_facts >> load_hdfs_to_clickhouse_dw
+    extract_mysql_to_hdfs >> build_staging >> build_dimensions >> build_facts >> load_hdfs_to_clickhouse_dw >> train_ml_revenue

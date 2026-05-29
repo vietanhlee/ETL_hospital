@@ -14,6 +14,7 @@ graph LR
     C -->|Fact Job| E(HDFS Gold Layer: Facts)
     D -->|Load Job| F[(ClickHouse DW)]
     E -->|Load Job| F
+    F -->|MLOps Job| G((MLflow Registry))
 ```
 
 Quá trình chia làm 5 Job Spark tách biệt, được điều phối tuần tự qua Airflow.
@@ -66,3 +67,10 @@ Quá trình chia làm 5 Job Spark tách biệt, được điều phối tuần t
   - **Thiết kế Bảng (Schema Definition):** Khởi tạo trước các bảng ClickHouse thông qua HTTP API bằng cơ chế Table Engine `ReplacingMergeTree`.
   - **Cơ chế Upsert (Incremental):** `ReplacingMergeTree` tự động dò quét và Ghi đè (Upsert) dữ liệu mới đè lên dữ liệu cũ dựa vào cấu hình `ORDER BY (Khóa chính)`. Tránh hiện tượng đúp số liệu nếu Job ETL lỡ bị chạy đè 2 lần một ngày, loại bỏ hoàn toàn cơ chế Truncate (Xóa trắng bảng) tốn kém.
   - **Truyền dẫn dữ liệu:** Sử dụng JDBC Push Batch qua Spark để đẩy hàng triệu dòng dữ liệu lên hệ thống ClickHouse Cloud một cách ổn định, tự động parse chuẩn mọi loại Data Types nhờ thừa hưởng từ cấu trúc của Parquet file.
+
+### 6. Job MLOps (Dự báo doanh thu)
+**Script:** `train_revenue_forecast.py`
+- **Nhiệm vụ:** Lấy dữ liệu từ ClickHouse DW, huấn luyện mô hình dự báo chuỗi thời gian (ARIMA) và tự động quản lý version mô hình qua công cụ MLflow.
+- **Nghiệp vụ:**
+  - **Dự báo:** Lấy tổng doanh thu từ bảng `fact_service_revenue` theo từng ngày. Chia tập Train/Test (30 ngày) và áp dụng mô hình ARIMA để dự báo doanh thu 30 ngày tiếp theo.
+  - **CI/CD Mô hình (Model Registry):** Tính toán độ chính xác (MAE, RMSE) của mô hình vừa train. Tự động so sánh với mô hình "Champion" đang được lưu trữ trên MLflow Registry. Nếu mô hình mới tốt hơn (sai số nhỏ hơn), hệ thống sẽ tự động đăng ký mô hình, tạo Schema (Signature) tự động, gắn kèm Description nghiệp vụ, và đánh dấu mác (alias) `champion` cho phiên bản mới.
