@@ -98,7 +98,7 @@ def main():
     mlflow.set_experiment(EXPERIMENT_NAME)
     
     print(f"3. Bắt đầu quá trình Train và Log vào MLflow ({MLFLOW_TRACKING_URI})...")
-    with mlflow.start_run(log_system_metrics=False) as run:
+    with mlflow.start_run() as run:
         # Khởi tạo mô hình ARIMA (Tham số giả định p=5, d=1, q=0)
         p, d, q = 5, 1, 0
         model = ARIMA(train_data['daily_revenue'], order=(p, d, q))
