@@ -1,0 +1,10 @@
+FROM apache/airflow:2.6.3
+
+USER root
+
+# Cài đặt sẵn Docker CLI vào Image để không phải tải lại mỗi lần khởi động
+RUN export DEBIAN_FRONTEND=noninteractive \
+    && apt-get update \
+    && apt-get install -y docker.io \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*

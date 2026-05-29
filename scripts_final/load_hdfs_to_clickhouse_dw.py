@@ -1,0 +1,182 @@
+# -*- coding: utf-8 -*-
+"""
+Job Nạp Dữ liệu (Load Job).
+Job này khởi tạo các bảng ClickHouse sử dụng ReplacingMergeTree (hỗ trợ Upsert),
+đọc dữ liệu tầng Gold từ HDFS (định dạng Parquet) và đẩy thẳng vào
+ClickHouse Cloud Data Warehouse thông qua JDBC.
+"""
+
+import os
+import sys
+import urllib.request
+import base64
+from hospital_utils import create_spark, read_parquet
+
+
+def get_jdbc_url(db_name=""):
+    """
+    Tạo chuỗi kết nối JDBC tới ClickHouse Cloud.
+    
+    Args:
+        db_name (str): Tên database. Mặc định là chuỗi rỗng.
+        
+    Returns:
+        str: Chuỗi kết nối JDBC hoàn chỉnh.
+    """
+    host = os.getenv('CLICKHOUSE_HOST', 'qlfb8ypu5w.ap-northeast-1.aws.clickhouse.cloud')
+    port = os.getenv('CLICKHOUSE_PORT', '8443')
+    secure = os.getenv('CLICKHOUSE_SECURE', 'True').lower() in ('true', '1', 't')
+    
+    url = f"jdbc:clickhouse://{host}:{port}/{db_name}"
+    if secure:
+        url += "?ssl=true"
+    return url
+
+
+def execute_ch_sql_http(host, port, user, password, db_name, sql_text, secure):
+    """
+    Thực thi mã SQL (DDL/DML) trên ClickHouse thông qua HTTP/HTTPS API.
+    Sử dụng để tạo Database và tạo Bảng (CREATE TABLE) vì JDBC của Spark 
+    không hỗ trợ tốt các lệnh DDL phức tạp của ClickHouse.
+    
+    Args:
+        host, port, user, password (str): Thông tin kết nối ClickHouse.
+        db_name (str): Tên database.
+        sql_text (str): Mã SQL cần thực thi.
+        secure (bool): Dùng HTTPS (True) hay HTTP (False).
+    """
+    protocol = "https" if secure else "http"
+    url = f"{protocol}://{host}:{port}/"
+    if db_name:
+        url += f"?database={db_name}"
+        
+    auth_str = f"{user}:{password}"
+    b64_auth = base64.b64encode(auth_str.encode('ascii')).decode('ascii')
+    
+    for sql in sql_text.split(";"):
+        sql = sql.strip()
+        if sql:
+            req = urllib.request.Request(url, data=sql.encode('utf-8'))
+            req.add_header("Authorization", f"Basic {b64_auth}")
+            try:
+                with urllib.request.urlopen(req) as response:
+                    response.read()
+            except Exception as e:
+                print(f"Error executing SQL: {sql}")
+                raise e
+
+
+def load_to_clickhouse(df, table_name, db_name='hospital_dw'):
+    """
+    Đẩy Spark DataFrame lên bảng ClickHouse qua giao thức JDBC.
+    Dữ liệu được đẩy theo từng lô (batchsize=10000) để tối ưu hiệu suất.
+    
+    Args:
+        df (DataFrame): Dữ liệu cần nạp.
+        table_name (str): Tên bảng đích trên ClickHouse.
+        db_name (str): Tên database đích.
+    """
+    jdbc_url = get_jdbc_url(db_name)
+    user = os.getenv('CLICKHOUSE_USER', 'default')
+    password = os.getenv('CLICKHOUSE_PASSWORD', 'N7f8bLl.qrbON')
+    
+    print(f"Inserting rows into {db_name}.{table_name} via JDBC...")
+    df.write \
+        .format("jdbc") \
+        .option("url", jdbc_url) \
+        .option("dbtable", table_name) \
+        .option("user", user) \
+        .option("password", password) \
+        .option("driver", "ru.yandex.clickhouse.ClickHouseDriver") \
+        .option("batchsize", "10000") \
+        .mode("append") \
+        .save()
+    print(f"Insert into {table_name} completed.")
+
+
+def main(run_date):
+    """
+    Hàm thực thi chính của Load Job.
+    
+    Quy trình:
+    1. Kết nối ClickHouse Cloud qua HTTP.
+    2. Tạo Database và các bảng (ReplacingMergeTree) nếu chưa tồn tại.
+    3. Đọc dữ liệu từ HDFS tầng Gold (đã là định dạng Parquet với schema chuẩn).
+    4. Nạp song song dữ liệu Dimension và Fact lên ClickHouse.
+    
+    Args:
+        run_date (str): Ngày chạy ETL.
+    """
+    spark = create_spark("LoadHDFSToClickHouseDW")
+
+    gold_base = f"hdfs://hdfs-namenode:8020/hospital_etl/gold/run_date={run_date}"
+
+    print("Connecting to ClickHouse via HTTP API...")
+    ch_host = os.getenv('CLICKHOUSE_HOST', 'qlfb8ypu5w.ap-northeast-1.aws.clickhouse.cloud')
+    ch_port = os.getenv('CLICKHOUSE_PORT', '8443')
+    ch_secure = os.getenv('CLICKHOUSE_SECURE', 'True').lower() in ('true', '1', 't')
+    ch_user = os.getenv('CLICKHOUSE_USER', 'default')
+    ch_password = os.getenv('CLICKHOUSE_PASSWORD', 'N7f8bLl.qrbON')
+    db_name = os.getenv('CLICKHOUSE_DB', 'hospital_dw')
+    
+    # Tạo DB nếu chưa có
+    execute_ch_sql_http(ch_host, ch_port, ch_user, ch_password, "", f"CREATE DATABASE IF NOT EXISTS {db_name}", ch_secure)
+
+    # 1. Khởi tạo Bảng với ReplacingMergeTree (Upsert logic)
+    # ReplacingMergeTree tự động ghi đè bản ghi cũ nếu cùng sorting key (ORDER BY)
+    print("Creating ClickHouse tables (ReplacingMergeTree) if not exist...")
+    
+    tables_ddl = {
+        "dim_date": "CREATE TABLE IF NOT EXISTS dim_date (DateKey Int32, FullDate Date, DayNumber Int32, MonthNumber Int32, MonthName String, QuarterNumber Int32, YearNumber Int32, DayOfWeekNumber Int32, DayOfWeekName String, IsWeekend Int32) ENGINE = ReplacingMergeTree() ORDER BY (DateKey)",
+        "dim_patient": "CREATE TABLE IF NOT EXISTS dim_patient (PatientKey Int64, PatientCode String, FullName String, Gender String, BirthYear Int32, AgeGroup String, City String) ENGINE = ReplacingMergeTree() ORDER BY (PatientCode)",
+        "dim_doctor": "CREATE TABLE IF NOT EXISTS dim_doctor (DoctorKey Int64, DoctorCode String, DoctorName String, Gender String, Specialty String, AcademicTitle String) ENGINE = ReplacingMergeTree() ORDER BY (DoctorCode)",
+        "dim_department": "CREATE TABLE IF NOT EXISTS dim_department (DepartmentKey Int64, DepartmentCode String, DepartmentName String, DepartmentGroup String) ENGINE = ReplacingMergeTree() ORDER BY (DepartmentCode)",
+        "dim_service": "CREATE TABLE IF NOT EXISTS dim_service (ServiceKey Int64, ServiceCode String, ServiceName String, ServiceType String) ENGINE = ReplacingMergeTree() ORDER BY (ServiceCode)",
+        "dim_medicine": "CREATE TABLE IF NOT EXISTS dim_medicine (MedicineKey Int64, MedicineCode String, MedicineName String, MedicineGroup String, Unit String) ENGINE = ReplacingMergeTree() ORDER BY (MedicineCode)",
+        "dim_insurance": "CREATE TABLE IF NOT EXISTS dim_insurance (InsuranceKey Int64, InsuranceCode String, InsuranceType String, CoverageRate Float64) ENGINE = ReplacingMergeTree() ORDER BY (InsuranceCode)",
+        "fact_visit": "CREATE TABLE IF NOT EXISTS fact_visit (VisitFactKey Int64, DateKey Int32, PatientKey Int64, DoctorKey Int64, DepartmentKey Int64, InsuranceKey Int64, VisitCode String, ConsultationFee Decimal(18,2), WaitingMinutes Int32, VisitCount Int32) ENGINE = ReplacingMergeTree() ORDER BY (VisitCode)",
+        "fact_service_revenue": "CREATE TABLE IF NOT EXISTS fact_service_revenue (ServiceRevenueFactKey Int64, DateKey Int32, PatientKey Int64, DoctorKey Int64, DepartmentKey Int64, ServiceKey Int64, InsuranceKey Int64, VisitCode String, ServiceTransactionCode String, Quantity Int32, UnitPrice Decimal(18,2), RevenueAmount Decimal(18,2), InsurancePaidAmount Decimal(18,2), PatientPaidAmount Decimal(18,2)) ENGINE = ReplacingMergeTree() ORDER BY (ServiceTransactionCode)",
+        "fact_prescription": "CREATE TABLE IF NOT EXISTS fact_prescription (PrescriptionFactKey Int64, DateKey Int32, PatientKey Int64, DoctorKey Int64, DepartmentKey Int64, MedicineKey Int64, InsuranceKey Int64, VisitCode String, PrescriptionCode String, Quantity Int32, UnitPrice Decimal(18,2), MedicineRevenueAmount Decimal(18,2), InsurancePaidAmount Decimal(18,2), PatientPaidAmount Decimal(18,2)) ENGINE = ReplacingMergeTree() ORDER BY (PrescriptionCode)"
+    }
+    
+    for tbl, ddl in tables_ddl.items():
+        execute_ch_sql_http(ch_host, ch_port, ch_user, ch_password, db_name, ddl, ch_secure)
+
+    print("Reading and transforming HDFS data (Parquet formats do not need cast)...")
+    
+    # 2. Đọc Parquet (đã lưu sẵn kiểu dữ liệu nên không cần .cast() như CSV)
+    dim_date = read_parquet(spark, f"{gold_base}/Dim_Date")
+    dim_patient = read_parquet(spark, f"{gold_base}/Dim_Patient")
+    dim_doctor = read_parquet(spark, f"{gold_base}/Dim_Doctor")
+    dim_department = read_parquet(spark, f"{gold_base}/Dim_Department")
+    dim_service = read_parquet(spark, f"{gold_base}/Dim_Service")
+    dim_medicine = read_parquet(spark, f"{gold_base}/Dim_Medicine")
+    dim_insurance = read_parquet(spark, f"{gold_base}/Dim_Insurance")
+    fact_visit = read_parquet(spark, f"{gold_base}/Fact_Visit")
+    fact_service = read_parquet(spark, f"{gold_base}/Fact_ServiceRevenue")
+    fact_prescription = read_parquet(spark, f"{gold_base}/Fact_Prescription")
+
+    print("Loading dimensions into ClickHouse DW (Upsert)...")
+    load_to_clickhouse(dim_date, "dim_date", db_name)
+    load_to_clickhouse(dim_patient, "dim_patient", db_name)
+    load_to_clickhouse(dim_doctor, "dim_doctor", db_name)
+    load_to_clickhouse(dim_department, "dim_department", db_name)
+    load_to_clickhouse(dim_service, "dim_service", db_name)
+    load_to_clickhouse(dim_medicine, "dim_medicine", db_name)
+    load_to_clickhouse(dim_insurance, "dim_insurance", db_name)
+
+    print("Loading facts into ClickHouse DW (Upsert)...")
+    load_to_clickhouse(fact_visit, "fact_visit", db_name)
+    load_to_clickhouse(fact_service, "fact_service_revenue", db_name)
+    load_to_clickhouse(fact_prescription, "fact_prescription", db_name)
+
+    print("Load HDFS gold to ClickHouse DW completed successfully.")
+    spark.stop()
+
+
+if __name__ == "__main__":
+    if len(sys.argv) < 2:
+        print("Usage: load_hdfs_to_clickhouse_dw.py <YYYY-MM-DD>")
+        sys.exit(1)
+
+    main(sys.argv[1])
