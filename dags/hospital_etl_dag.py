@@ -73,7 +73,7 @@ with DAG(
     # Task MLOps: Dự báo doanh thu
     train_ml_revenue = BashOperator(
         task_id="train_ml_revenue_forecast",
-        bash_command="python /opt/spark-apps/hospital_etl/scripts_final/train_revenue_forecast.py",
+        bash_command="export MLFLOW_TRACKING_URI='http://mlflow-server:5000' && python /opt/spark-apps/hospital_etl/scripts_final/train_revenue_forecast.py",
     )
 
     # ---------------------------------------------------------
