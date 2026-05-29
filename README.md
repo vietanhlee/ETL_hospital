@@ -45,12 +45,10 @@ docker compose up --build -d
 ```
 *Lưu ý:* Cờ `--build` ở lần đầu tiên sẽ giúp Docker tự động đọc file `Dockerfile.airflow` để cài sẵn Docker CLI vào Airflow, giúp giao diện UI bật lên siêu nhanh (dưới 5s ở những lần chạy sau).
 
-### Bước 2: Tạo Dữ liệu Nguồn (Source Data) cho MySQL
-Hệ thống cần có dữ liệu trong MySQL để bắt đầu quá trình ETL. Rất may, với thiết lập hiện tại, dữ liệu nguồn sẽ được **tự động khởi tạo** ngay khi bạn chạy lệnh `docker compose up` lần đầu tiên!
+### Bước 2: Khởi tạo Dữ liệu Nguồn (Source Data)
+Dữ liệu mẫu từ thư mục `datasource/` (các file `.sql`) sẽ được hệ thống **tự động nạp** vào cơ sở dữ liệu MySQL ngay trong lần đầu chạy Docker. Không cần thực hiện thêm thao tác thủ công nào để tạo dữ liệu nguồn.
 
-Cụ thể, thư mục `datasource/` chứa các file `.sql` đã được map thẳng vào thư mục `/docker-entrypoint-initdb.d/` bên trong container MySQL. Tiến trình nội bộ của MySQL sẽ tự động duyệt qua các file này và đổ dữ liệu vào DB. Bạn **không cần phải cài đặt Python hay chạy bất kỳ câu lệnh nào cả**!
-
-*(Lưu ý nhỏ: Cơ chế này chỉ chạy duy nhất 1 lần khi ổ cứng ảo `mysql_data` đang trống rỗng. Nếu bạn muốn xóa toàn bộ data hiện tại và sinh lại dữ liệu từ đầu, hãy gõ lệnh `docker compose down -v` để xóa Volume trước khi up lại).*
+*(Lưu ý: Cơ chế tự động nạp chỉ diễn ra một lần khi volume `mysql_data` trống. Nếu muốn xóa dữ liệu hiện tại và nạp lại từ đầu, hãy chạy lệnh `docker compose down -v` để xóa volume trước khi khởi động lại).*
 
 ### Bước 3: Theo dõi và Chạy luồng ETL qua Airflow
 1. Mở trình duyệt, truy cập vào giao diện Airflow:
