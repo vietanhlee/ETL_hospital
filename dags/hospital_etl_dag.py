@@ -1,7 +1,7 @@
 """
 DAG điều phối luồng ETL Bệnh viện (Hospital ETL Pipeline).
 Sử dụng Airflow để tự động hóa việc chạy các job Spark qua BashOperator.
-Thứ tự thực thi: Extract (MySQL -> HDFS) -> Staging (Silver) -> Dimensions (Gold) -> Facts (Gold) -> Load (ClickHouse).
+Thứ tự thực thi: Extract (MySQL -> HDFS) -> Staging (Silver) -> Dimensions (Gold) -> Facts (Gold) -> Load (ClickHouse) -> ML Model.
 """
 from datetime import datetime, timedelta
 
@@ -13,7 +13,7 @@ from airflow.operators.bash import BashOperator
 default_args = {
     "owner": "hospital_etl_pipeline",
     "retries": 1,
-    "retry_delay": timedelta(minutes=3), # Nếu fail, đợi 3 phút rồi chạy lại
+    "retry_delay": timedelta(minutes=1), # Nếu fail, đợi 1 phút rồi chạy lại
 }
 
 
@@ -70,14 +70,14 @@ with DAG(
         """,
     )
 
-    # Task MLOps: Dự báo doanh thu
-    train_ml_revenue = BashOperator(
-        task_id="train_ml_revenue_forecast",
-        bash_command="export MLFLOW_TRACKING_URI='http://mlflow-server:5000' && python /opt/spark-apps/hospital_etl/scripts_final/train_revenue_forecast.py",
+    # Task MLOps: Dự báo doanh thu & người dùng
+    train_ml_models = BashOperator(
+        task_id="train_ml_forecast_models",
+        bash_command="export MLFLOW_TRACKING_URI='http://mlflow-server:5000' && python /opt/spark-apps/hospital_etl/scripts_final/train_forecast_models.py",
     )
 
     # ---------------------------------------------------------
     # Xác định thứ tự chạy các task (Dependencies)
     # Data Lake Medallion Architecture: Bronze -> Silver -> Gold -> Data Warehouse
     # ---------------------------------------------------------
-    extract_mysql_to_hdfs >> build_staging >> build_dimensions >> build_facts >> load_hdfs_to_clickhouse_dw >> train_ml_revenue
+    extract_mysql_to_hdfs >> build_staging >> build_dimensions >> build_facts >> load_hdfs_to_clickhouse_dw >> train_ml_models
