@@ -38,14 +38,12 @@ PROJECT_DIR="/opt/spark-apps/hospital_etl"
 # hiện tại đang chạy bản final - SQL thuần
 SCRIPTS_DIR="${PROJECT_DIR}/scripts_final"
 
-JARS_DIR="${PROJECT_DIR}/jars"
-
 SPARK_MASTER_CONTAINER="spark-master"
 SPARK_MASTER_URL="spark://spark-master:7077"
 
-SPARK_EXECUTOR_CORES="1"
-SPARK_CORES_MAX="2"
-SPARK_EXECUTOR_MEMORY="512m"
+SPARK_EXECUTOR_CORES="2"
+SPARK_CORES_MAX="4"
+SPARK_EXECUTOR_MEMORY="1536m"
 
 
 echo "=================================================="
