@@ -159,14 +159,16 @@ services:
   # MLOPS (MLFLOW TRACKING SERVER)
   # ==========================================
   mlflow-server:
-    image: python:3.9-slim
+    image: ghcr.io/mlflow/mlflow:latest
     container_name: mlflow-server
     restart: always
     ports:
       - "5000:5000" # Mở port 5000 cho giao diện Web UI của MLflow
+    environment:
+      MLFLOW_SERVER_ALLOWED_HOSTS: "mlflow-server,mlflow-server:5000,localhost,localhost:5000,127.0.0.1,127.0.0.1:5000"
     volumes:
-      - ./mlruns:/mlruns # Thư mục lưu trữ model và database sqlite của MLflow
-    command: bash -c "pip install mlflow && mlflow server --backend-store-uri sqlite:////mlruns/mlflow.db --default-artifact-root /mlruns --host 0.0.0.0 --port 5000"
+      - mlflow_data:/mlruns # Sử dụng Docker Volume thay vì lưu trực tiếp vào thư mục dự án
+    command: mlflow server --backend-store-uri sqlite:////mlruns/mlflow.db --serve-artifacts --default-artifact-root mlflow-artifacts:/ --artifacts-destination /mlruns --host 0.0.0.0 --port 5000
     networks:
       - etl_network
 
@@ -178,6 +180,7 @@ volumes:
   namenode_data:   # Lưu cấu trúc cây thư mục (metadata) của HDFS
   datanode_data:   # Lưu các khối dữ liệu thực của HDFS
   postgres_data:   # Lưu metadata (lịch sử cấu hình, chạy DAG) của Airflow
+  mlflow_data:     # Lưu database và artifact của MLflow
 
 # ==========================================
 # KHAI BÁO NETWORKS (MẠNG ẢO CHO CÁC CONTAINER GIAO TIẾP VỚI NHAU)
