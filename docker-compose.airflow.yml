@@ -1,0 +1,73 @@
+services:
+  # ==========================================
+  # HỆ QUẢN TRỊ CƠ SỞ DỮ LIỆU DÀNH CHO AIRFLOW
+  # ==========================================
+  postgres:
+    image: postgres:13
+    container_name: postgres
+    environment:
+      POSTGRES_USER: airflow
+      POSTGRES_PASSWORD: airflow
+      POSTGRES_DB: airflow
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - etl_network
+
+  # ==========================================
+  # CÔNG CỤ ĐIỀU PHỐI (APACHE AIRFLOW)
+  # ==========================================
+  airflow-webserver:
+    build:
+      context: .
+      dockerfile: Dockerfile.airflow # Xây dựng image tùy chỉnh dựa trên Dockerfile.airflow (cài thêm thư viện Python cần thiết)
+    container_name: airflow-webserver
+    hostname: airflow-webserver
+    env_file: .env
+    depends_on:
+      - postgres
+    user: root # Chạy container với quyền root để Airflow có quyền gọi lệnh (như docker, spark-submit) nếu cần
+    environment:
+      - AIRFLOW__DATABASE__SQL_ALCHEMY_CONN=postgresql+psycopg2://airflow:airflow@postgres/airflow # Chuỗi kết nối tới Postgres nội bộ
+      - AIRFLOW__CORE__EXECUTOR=LocalExecutor # Sử dụng LocalExecutor cho phép chạy nhiều Task song song trong cùng 1 môi trường (container) thay vì chạy tuần tự như SequentialExecutor
+      - AIRFLOW__CORE__LOAD_EXAMPLES=False # Tắt các DAG mẫu mặc định của Airflow để giao diện gọn gàng hơn
+      - AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION=True # Đặt False để các DAG mới xuất hiện sẽ tự động được kích hoạt (Unpause)
+      - AIRFLOW__WEBSERVER__SECRET_KEY=hospital_etl_secret_key # Khóa bảo mật của ứng dụng web
+    ports:
+      - "8082:8080" # Cổng truy cập giao diện Airflow Web UI từ máy host
+    volumes:
+      - .:/opt/spark-apps/hospital_etl # Mount thư mục gốc dự án (chứa config, utils, scripts_final...)
+      - ./dags:/opt/airflow/dags # Mount thư mục dags để Airflow nhận diện tự động các file Python định nghĩa DAG
+      - /var/run/docker.sock:/var/run/docker.sock # Mount socket của Docker, giúp Airflow (khi chạy DockerOperator hoặc bash gọi docker) có thể giao tiếp với Docker Engine trên máy host (Docker-in-Docker)
+    networks:
+      - etl_network
+    command: bash -c "airflow db migrate && (airflow users create --username admin --password admin --firstname Admin --lastname Admin --role Admin --email admin@example.com || true) && airflow webserver"
+
+  airflow-scheduler:
+    build:
+      context: .
+      dockerfile: Dockerfile.airflow # Dùng chung image tùy chỉnh như webserver
+    container_name: airflow-scheduler
+    hostname: airflow-scheduler
+    env_file: .env
+    user: root
+    depends_on:
+      - airflow-webserver # Scheduler nên chạy sau khi Webserver và DB đã khởi tạo xong
+    environment:
+      - AIRFLOW__DATABASE__SQL_ALCHEMY_CONN=postgresql+psycopg2://airflow:airflow@postgres/airflow
+      - AIRFLOW__CORE__EXECUTOR=LocalExecutor
+      - AIRFLOW__CORE__LOAD_EXAMPLES=False
+      - AIRFLOW__WEBSERVER__SECRET_KEY=hospital_etl_secret_key
+    volumes:
+      - .:/opt/spark-apps/hospital_etl
+      - ./dags:/opt/airflow/dags
+      - /var/run/docker.sock:/var/run/docker.sock
+    networks:
+      - etl_network
+    command: bash -c "airflow scheduler"
+
+volumes:
+  postgres_data:
+
+networks:
+  etl_network:

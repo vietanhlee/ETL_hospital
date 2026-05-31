@@ -1,0 +1,50 @@
+services:
+  # ==========================================
+  # CƠ SỞ DỮ LIỆU NGUỒN (SOURCE DATABASE)
+  # ==========================================
+  mysql:
+    image: mysql:8.0
+    container_name: mysql
+    restart: always # Tự động khởi động lại container nếu bị lỗi hoặc server khởi động lại
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-rootpassword} # Mật khẩu root lấy từ file .env, nếu không có sẽ dùng "rootpassword"
+      MYSQL_DATABASE: hospital_source # Tự động tạo database có tên này khi khởi tạo lần đầu
+    command: --default-authentication-plugin=mysql_native_password # Yêu cầu MySQL dùng chuẩn mã hóa mật khẩu cũ (tương thích tốt hơn với các công cụ/driver cũ)
+    ports:
+      - "3306:3306" # Ánh xạ cổng 3306 của host (máy tính của bạn) vào cổng 3306 của container
+    volumes:
+      - mysql_data:/var/lib/mysql # Khai báo Docker Volume để lưu trữ dữ liệu vĩnh viễn (tránh mất dữ liệu khi xóa container)
+      - ./datasource:/docker-entrypoint-initdb.d # Mount thư mục chứa các file .sql (nếu có) để MySQL tự động chạy khi khởi tạo lần đầu
+    networks:
+      - etl_network
+
+  # ==========================================
+  # DATA WAREHOUSE (CLICKHOUSE)
+  # ==========================================
+  clickhouse:
+    image: clickhouse/clickhouse-server:24.8
+    container_name: clickhouse
+    restart: always
+    environment:
+      CLICKHOUSE_USER: default
+      CLICKHOUSE_PASSWORD: "" # Mật khẩu trống cho môi trường local
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 1 # Bật quản lý phân quyền thông qua SQL
+    ports:
+      - "8123:8123" # HTTP API (clickhouse-connect, curl, browser)
+      - "9009:9000" # Native TCP protocol (9009 host -> 9000 container, tránh trùng HDFS port 9000)
+    volumes:
+      - clickhouse_data:/var/lib/clickhouse # Lưu trữ dữ liệu vĩnh viễn
+    ulimits:
+      nofile:
+        soft: 262144
+        hard: 262144
+    networks:
+      - etl_network
+
+
+volumes:
+  mysql_data:
+  clickhouse_data:
+
+networks:
+  etl_network:

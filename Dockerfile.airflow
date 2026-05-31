@@ -1,4 +1,4 @@
-FROM apache/airflow:2.9.2-python3.10
+FROM apache/airflow:2.11.2-python3.12
 
 USER root
 
@@ -11,4 +11,7 @@ RUN export DEBIAN_FRONTEND=noninteractive \
 
 # Cài đặt thư viện Machine Learning cho các task MLOps trong luồng Airflow
 USER airflow
-RUN pip install --no-cache-dir pandas numpy clickhouse-connect mlflow statsmodels scikit-learn matplotlib
+RUN pip install --no-cache-dir uv \
+    && VIRTUAL_ENV=/home/airflow/.local uv pip install pandas numpy clickhouse-connect mlflow statsmodels scikit-learn matplotlib
+
+#  --constraint "https://raw.githubusercontent.com/apache/airflow/constraints-2.11.2/constraints-3.12.txt"

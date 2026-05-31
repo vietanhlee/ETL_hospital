@@ -1,190 +1,26 @@
-services:
-  # ==========================================
-  # CƠ SỞ DỮ LIỆU NGUỒN (SOURCE DATABASE)
-  # ==========================================
-  mysql:
-    image: mysql:8.0
-    container_name: mysql
-    restart: always # Tự động khởi động lại container nếu bị lỗi hoặc server khởi động lại
-    environment:
-      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-rootpassword} # Mật khẩu root lấy từ file .env, nếu không có sẽ dùng "rootpassword"
-      MYSQL_DATABASE: hospital_source # Tự động tạo database có tên này khi khởi tạo lần đầu
-    command: --default-authentication-plugin=mysql_native_password # Yêu cầu MySQL dùng chuẩn mã hóa mật khẩu cũ (tương thích tốt hơn với các công cụ/driver cũ)
-    ports:
-      - "3306:3306" # Ánh xạ cổng 3306 của host (máy tính của bạn) vào cổng 3306 của container
-    volumes:
-      - mysql_data:/var/lib/mysql # Khai báo Docker Volume để lưu trữ dữ liệu vĩnh viễn (tránh mất dữ liệu khi xóa container)
-      - ./datasource:/docker-entrypoint-initdb.d # Mount thư mục chứa các file .sql (nếu có) để MySQL tự động chạy khi khởi tạo lần đầu
-    networks:
-      - etl_network
-
-  # ==========================================
-  # HỆ THỐNG LƯU TRỮ PHÂN TÁN (HDFS)
-  # ==========================================
-  hdfs-namenode:
-    image: bde2020/hadoop-namenode:2.0.0-hadoop3.2.1-java8
-    container_name: hdfs-namenode
-    restart: always
-    environment:
-      - CLUSTER_NAME=test
-      - CORE_CONF_fs_defaultFS=hdfs://hdfs-namenode:8020 # Định nghĩa địa chỉ gốc của HDFS (Port 8020 là cổng RPC cho NameNode)
-    ports:
-      - "9870:9870" # Cổng giao diện Web UI của HDFS NameNode để bạn xem thông tin thư mục, file
-      - "9000:9000" # Cổng IPC cũ (dự phòng)
-    volumes:
-      - namenode_data:/hadoop/dfs/name # Lưu trữ metadata của HDFS (cấu trúc thư mục, vị trí các block file)
-    networks:
-      - etl_network
-
-  hdfs-datanode:
-    image: bde2020/hadoop-datanode:2.0.0-hadoop3.2.1-java8
-    container_name: hdfs-datanode
-    restart: always
-    environment:
-      - SERVICE_PRECONDITION=hdfs-namenode:9870 # Đảm bảo NameNode khởi động và sẵn sàng ở Web UI port 9870 thì DataNode mới bắt đầu chạy
-      - CORE_CONF_fs_defaultFS=hdfs://hdfs-namenode:8020 # Cấu hình trỏ tới NameNode để DataNode biết kết nối tới đâu
-    ports:
-      - "9864:9864" # Cổng Web UI / HTTP API của DataNode
-    volumes:
-      - datanode_data:/hadoop/dfs/data # Nơi lưu trữ các block dữ liệu thực tế của HDFS
-    networks:
-      - etl_network
-    depends_on:
-      - hdfs-namenode # Yêu cầu container hdfs-namenode phải chạy trước
-
-  # ==========================================
-  # CỤM XỬ LÝ DỮ LIỆU LỚN (APACHE SPARK)
-  # ==========================================
-  spark-master:
-    image: bde2020/spark-master:3.2.1-hadoop3.2
-    container_name: spark-master
-    env_file: .env # Nạp các biến môi trường cấu hình từ file .env
-    environment:
-      - INIT_DAEMON_STEP=setup_spark
-    ports:
-      - "8083:8080" # Cổng Web UI của Spark Master. Đổi thành 8083 trên máy host để tránh trùng với cổng 8080 của Airflow
-      - "7077:7077" # Cổng giao tiếp nội bộ để Spark Worker và trình spark-submit (từ Airflow) kết nối tới Master
-    volumes:
-      - .:/opt/spark-apps/hospital_etl # Mount toàn bộ code dự án vào container để Spark có thể đọc và chạy các script (PySpark)
-    networks:
-      - etl_network
-
-  spark-worker:
-    image: bde2020/spark-worker:3.2.1-hadoop3.2
-    container_name: spark-worker
-    env_file: .env
-    environment:
-      - SPARK_MASTER=spark://spark-master:7077 # Trỏ tới địa chỉ nội bộ của Spark Master
-      - SPARK_WORKER_CORES=2 # Cấu hình số core CPU tối đa cấp cho Spark Worker
-      - SPARK_WORKER_MEMORY=2G # Cấu hình dung lượng RAM tối đa cấp cho Spark Worker
-    ports:
-      - "8081:8081" # Cổng Web UI của Spark Worker
-    volumes:
-      - .:/opt/spark-apps/hospital_etl # Mount mã nguồn tương tự Spark Master để worker có thể thực thi mã lệnh
-    networks:
-      - etl_network
-    depends_on:
-      - spark-master
-
-  # ==========================================
-  # HỆ QUẢN TRỊ CƠ SỞ DỮ LIỆU DÀNH CHO AIRFLOW
-  # ==========================================
-  postgres:
-    image: postgres:13
-    container_name: postgres
-    environment:
-      POSTGRES_USER: airflow
-      POSTGRES_PASSWORD: airflow
-      POSTGRES_DB: airflow # Cơ sở dữ liệu mặc định để Airflow lưu trữ metadata (các DAG, Task, Lịch sử chạy...)
-    volumes:
-      - postgres_data:/var/lib/postgresql/data # Lưu dữ liệu Postgres vĩnh viễn
-    networks:
-      - etl_network
-
-  # ==========================================
-  # CÔNG CỤ ĐIỀU PHỐI (APACHE AIRFLOW)
-  # ==========================================
-  airflow-webserver:
-    build:
-      context: .
-      dockerfile: Dockerfile.airflow # Xây dựng image tùy chỉnh dựa trên Dockerfile.airflow (cài thêm thư viện Python cần thiết)
-    container_name: airflow-webserver
-    hostname: airflow-webserver
-    env_file: .env
-    user: root # Chạy container với quyền root để Airflow có quyền gọi lệnh (như docker, spark-submit) nếu cần
-    depends_on:
-      - postgres # Airflow Webserver cần Postgres để đọc/ghi metadata
-    environment:
-      - AIRFLOW__DATABASE__SQL_ALCHEMY_CONN=postgresql+psycopg2://airflow:airflow@postgres/airflow # Chuỗi kết nối tới Postgres nội bộ
-      - AIRFLOW__CORE__EXECUTOR=LocalExecutor # Sử dụng LocalExecutor cho phép chạy nhiều Task song song trong cùng 1 môi trường (container) thay vì chạy tuần tự như SequentialExecutor
-      - AIRFLOW__CORE__LOAD_EXAMPLES=False # Tắt các DAG mẫu mặc định của Airflow để giao diện gọn gàng hơn
-      - AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION=True # Đặt False để các DAG mới xuất hiện sẽ tự động được kích hoạt (Unpause)
-      - AIRFLOW__WEBSERVER__SECRET_KEY=hospital_etl_secret_key # Khóa bảo mật của ứng dụng web
-    ports:
-      - "8082:8080" # Cổng truy cập giao diện Airflow Web UI từ máy host
-    volumes:
-      - .:/opt/spark-apps/hospital_etl # Mount thư mục gốc dự án (chứa config, utils, scripts_final...)
-      - ./dags:/opt/airflow/dags # Mount thư mục dags để Airflow nhận diện tự động các file Python định nghĩa DAG
-      - /var/run/docker.sock:/var/run/docker.sock # Mount socket của Docker, giúp Airflow (khi chạy DockerOperator hoặc bash gọi docker) có thể giao tiếp với Docker Engine trên máy host (Docker-in-Docker)
-    networks:
-      - etl_network
-    # Lệnh khởi động: Tự động tạo/nâng cấp các bảng metadata của Airflow, tạo tài khoản admin và sau đó bật webserver
-    command: bash -c "airflow db upgrade && (airflow users create --username admin --password admin --firstname Admin --lastname Admin --role Admin --email admin@example.com || true) && airflow webserver"
-
-  airflow-scheduler:
-    build:
-      context: .
-      dockerfile: Dockerfile.airflow # Dùng chung image tùy chỉnh như webserver
-    container_name: airflow-scheduler
-    hostname: airflow-scheduler
-    env_file: .env
-    user: root
-    depends_on:
-      - airflow-webserver # Scheduler nên chạy sau khi Webserver và DB đã khởi tạo xong
-    environment:
-      - AIRFLOW__DATABASE__SQL_ALCHEMY_CONN=postgresql+psycopg2://airflow:airflow@postgres/airflow
-      - AIRFLOW__CORE__EXECUTOR=LocalExecutor
-      - AIRFLOW__CORE__LOAD_EXAMPLES=False
-      - AIRFLOW__WEBSERVER__SECRET_KEY=hospital_etl_secret_key
-    volumes:
-      - .:/opt/spark-apps/hospital_etl
-      - ./dags:/opt/airflow/dags
-      - /var/run/docker.sock:/var/run/docker.sock
-    networks:
-      - etl_network
-    # Lệnh khởi động: Đảm bảo metadata đã cập nhật (phòng khi scheduler chạy trước webserver 1 chút) rồi khởi động tiến trình lập lịch (scheduler)
-    command: bash -c "airflow db upgrade && airflow scheduler"
-
-  # ==========================================
-  # MLOPS (MLFLOW TRACKING SERVER)
-  # ==========================================
-  mlflow-server:
-    image: ghcr.io/mlflow/mlflow:latest
-    container_name: mlflow-server
-    restart: always
-    ports:
-      - "5000:5000" # Mở port 5000 cho giao diện Web UI của MLflow
-    environment:
-      MLFLOW_SERVER_ALLOWED_HOSTS: "mlflow-server,mlflow-server:5000,localhost,localhost:5000,127.0.0.1,127.0.0.1:5000"
-    volumes:
-      - mlflow_data:/mlruns # Sử dụng Docker Volume thay vì lưu trực tiếp vào thư mục dự án
-    command: mlflow server --backend-store-uri sqlite:////mlruns/mlflow.db --serve-artifacts --default-artifact-root mlflow-artifacts:/ --artifacts-destination /mlruns --host 0.0.0.0 --port 5000
-    networks:
-      - etl_network
+include:
+  - docker-compose.data.yml    # Database (MySQL, ClickHouse)
+  - docker-compose.hdfs.yml    # Hadoop Distributed File System
+  - docker-compose.spark.yml   # Cluster xử lý dữ liệu lớn Spark
+  - docker-compose.airflow.yml # Công cụ điều phối luồng chạy Airflow
+  - docker-compose.mlops.yml   # Tracking MLflow
 
 # ==========================================
-# KHAI BÁO VOLUMES (LƯU TRỮ VĨNH VIỄN - PERSISTENCE)
+# KHAI BÁO VOLUMES (LƯU TRỮ VĨNH VIỄN)
+# Khai báo ở đây giúp Docker tự động tạo volume dùng chung cho toàn bộ dự án
 # ==========================================
 volumes:
-  mysql_data:      # Lưu data của database MySQL
-  namenode_data:   # Lưu cấu trúc cây thư mục (metadata) của HDFS
-  datanode_data:   # Lưu các khối dữ liệu thực của HDFS
-  postgres_data:   # Lưu metadata (lịch sử cấu hình, chạy DAG) của Airflow
-  mlflow_data:     # Lưu database và artifact của MLflow
+  mysql_data:
+  namenode_data:
+  datanode_data:
+  postgres_data:
+  clickhouse_data:
+  mlflow_data:
 
 # ==========================================
-# KHAI BÁO NETWORKS (MẠNG ẢO CHO CÁC CONTAINER GIAO TIẾP VỚI NHAU)
+# KHAI BÁO NETWORKS (MẠNG ẢO DÙNG CHUNG)
+# Các container trong các file trên đều có thể nhìn thấy nhau thông qua mạng này
 # ==========================================
 networks:
   etl_network:
-    driver: bridge # Cấu hình mạng kiểu bridge, cho phép các container trong cùng mạng kết nối với nhau qua tên container_name (ví dụ: gõ "mysql" là phân giải được ra IP của container mysql)
+    driver: bridge
