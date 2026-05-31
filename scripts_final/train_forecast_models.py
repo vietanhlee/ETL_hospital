@@ -25,10 +25,10 @@ warnings.filterwarnings('ignore', category=RuntimeWarning)
 # ==========================================
 # CẤU HÌNH KẾT NỐI
 # ==========================================
-CH_HOST = os.getenv('CLICKHOUSE_HOST', 'qlfb8ypu5w.ap-northeast-1.aws.clickhouse.cloud')
-CH_PORT = int(os.getenv('CLICKHOUSE_PORT', '8443'))
+CH_HOST = os.getenv('CLICKHOUSE_HOST', 'clickhouse')   # fallback về container local
+CH_PORT = int(os.getenv('CLICKHOUSE_PORT', '8123'))     # HTTP port local (không SSL)
 CH_USER = os.getenv('CLICKHOUSE_USER', 'default')
-CH_PASSWORD = os.getenv('CLICKHOUSE_PASSWORD', 'N7f8bLl.qrbON')
+CH_PASSWORD = os.getenv('CLICKHOUSE_PASSWORD', '')      # local không có password
 CH_DB = 'hospital_dw'
 MLFLOW_TRACKING_URI = os.getenv("MLFLOW_TRACKING_URI", "http://localhost:5000")
 
@@ -246,11 +246,25 @@ def train_and_register_model(forecast_type):
             client.set_registered_model_alias(MODEL_NAME, "champion", mv.version)
             print(f"   => Thành công! Đã đăng ký Version mới: {mv.version} làm Champion.")
 
+import concurrent.futures
+
 def main():
-    # 1. Dự báo doanh thu
-    train_and_register_model("revenue")
-    # 2. Dự báo số lượng người dùng
-    train_and_register_model("user_count")
+    forecast_types = ["revenue", "user_count"]
+    print(f"🚀 Bắt đầu huấn luyện ĐA TIẾN TRÌNH cho {len(forecast_types)} mô hình...")
+    
+    # Khởi tạo ProcessPoolExecutor với 2 worker chạy song song
+    with concurrent.futures.ProcessPoolExecutor(max_workers=2) as executor:
+        # Đẩy các tác vụ vào pool
+        futures = {executor.submit(train_and_register_model, ftype): ftype for ftype in forecast_types}
+        
+        # Chờ và lấy kết quả của từng tiến trình khi nó hoàn thành
+        for future in concurrent.futures.as_completed(futures):
+            ftype = futures[future]
+            try:
+                future.result() # Bắt lỗi nếu tiến trình ném ra Exception
+                print(f"✅ Đã hoàn thành toàn bộ Pipeline cho mô hình: {ftype.upper()}")
+            except Exception as exc:
+                print(f"❌ Lỗi nghiêm trọng khi huấn luyện mô hình {ftype.upper()}: {exc}")
 
 if __name__ == "__main__":
     main()
