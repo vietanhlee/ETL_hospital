@@ -41,9 +41,9 @@ SCRIPTS_DIR="${PROJECT_DIR}/scripts_final"
 SPARK_MASTER_CONTAINER="spark-master"
 SPARK_MASTER_URL="spark://spark-master:7077"
 
-SPARK_EXECUTOR_CORES="2"
-SPARK_CORES_MAX="4"
-SPARK_EXECUTOR_MEMORY="1536m"
+SPARK_EXECUTOR_CORES="3"
+SPARK_CORES_MAX="9"
+SPARK_EXECUTOR_MEMORY="1800m"
 
 
 echo "=================================================="

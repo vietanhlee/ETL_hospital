@@ -31,11 +31,12 @@ def main(run_date):
     gold_base = f"hdfs://hdfs-namenode:8020/hospital_etl/gold/run_date={run_date}"
 
     print("Connecting to ClickHouse via HTTP API...")
-    ch_host = os.getenv('CLICKHOUSE_HOST', 'qlfb8ypu5w.ap-northeast-1.aws.clickhouse.cloud')
-    ch_port = os.getenv('CLICKHOUSE_PORT', '8443')
-    ch_secure = os.getenv('CLICKHOUSE_SECURE', 'True').lower() in ('true', '1', 't')
+    # Ưu tiên đọc từ biến môi trường (cloud). Nếu không có, fallback về ClickHouse local trong Docker
+    ch_host = os.getenv('CLICKHOUSE_HOST', 'clickhouse')       # 'clickhouse' = tên container trong etl_network
+    ch_port = os.getenv('CLICKHOUSE_PORT', '8123')             # 8123 = HTTP port của local ClickHouse (không dùng SSL)
+    ch_secure = os.getenv('CLICKHOUSE_SECURE', 'False').lower() in ('true', '1', 't')  # Local không cần SSL
     ch_user = os.getenv('CLICKHOUSE_USER', 'default')
-    ch_password = os.getenv('CLICKHOUSE_PASSWORD', 'N7f8bLl.qrbON')
+    ch_password = os.getenv('CLICKHOUSE_PASSWORD', '')         # Local mặc định không có password
     db_name = os.getenv('CLICKHOUSE_DB', 'hospital_dw')
     
     # Tạo DB nếu chưa có
