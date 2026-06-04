@@ -1,72 +1,107 @@
 # Hospital ETL Pipeline
 
-Hệ thống ETL (Extract, Transform, Load) dành cho dữ liệu bệnh viện. Dự án này lấy dữ liệu từ cơ sở dữ liệu hệ thống nguồn (MySQL), xử lý qua các luồng Data Lake (HDFS) sử dụng Apache Spark (PySpark), và cuối cùng đẩy dữ liệu sạch (Data Warehouse) lên ClickHouse Cloud phục vụ cho báo cáo BI.
+A comprehensive end-to-end ETL (Extract, Transform, Load) and MLOps pipeline designed for hospital data integration, warehousing, and predictive analytics. 
 
-## 🏗 Cấu trúc thư mục dự án
+This project extracts operational database (OLTP) logs from **MySQL**, ingests and processes data through a multi-layered Data Lake (**HDFS**) using **Apache Spark (PySpark)** under the **Medallion Architecture**, loads cleansed and structured dimensional data into a **ClickHouse Cloud/Local Data Warehouse**, and automates predictive time-series forecasting (SARIMA) tracked via **MLflow**.
+
+![Pipeline Architecture](assets/pipeline.png)
+
+---
+
+## 🏗 Project Directory Structure
 
 ```text
 Hospital_ETL/
-├── dags/                           # Chứa các DAG của Airflow để tự động hóa luồng chạy ETL.
-│   └── hospital_etl_dag.py         # File định nghĩa luồng DAG chính
-├── datasource/                     # Chứa các file dữ liệu gốc (.sql) dùng để khởi tạo Database Source.
-├── docs/                           # Thư mục chứa tài liệu nghiệp vụ chi tiết của dự án.
-├── scripts_final/                  # Thư mục mã nguồn PySpark lõi của dự án (Mới nhất).
-│   ├── extract_mysql_to_hdfs.py    # Job 1: Extract từ MySQL đẩy thẳng vào HDFS (Bronze).
-│   ├── hospital_staging_job.py     # Job 2: Làm sạch, map alias và xuất ra Silver layer.
-│   ├── hospital_dimension_job.py   # Job 3: Tạo Dimension Tables (Gold layer).
-│   ├── hospital_fact_job.py        # Job 4: Tạo Fact Tables (Gold layer) và xử lý Data Quality.
-│   ├── load_hdfs_to_clickhouse_dw.py # Job 5: Đẩy dữ liệu từ Gold Layer lên ClickHouse DW.
-│   ├── train_forecast_models.py    # Job 6 (MLOps): Huấn luyện mô hình SARIMA dự báo doanh thu và lượng người dùng.
-│   └── hospital_utils.py           # Các hàm tiện ích dùng chung (đọc/ghi parquet, tạo spark session).
-├── shell/                          # Bash scripts được gọi bởi Airflow để submit các Job Spark.
-│   └── hospital_etl_airflow.sh
-├── Dockerfile.airflow              # File Docker tùy chỉnh cho Airflow (Đã tích hợp sẵn Docker CLI).
-├── docker-compose.yml              # Cấu hình kiến trúc hạ tầng (HDFS, Spark, Airflow, MySQL, Postgres).
-├── generate_source_data.py         # Script Python độc lập dùng để đổ dữ liệu mẫu vào MySQL (Cách thay thế/Dự phòng).
-└── requirements.txt                # Danh sách thư viện Python cần thiết (pymysql, pyspark...).
+├── dags/                           # Airflow DAGs orchestrating the ETL pipeline
+│   └── hospital_etl_dag.py         # Main DAG definition file
+├── datasource/                     # Sample OLTP data scripts (.sql) for auto-initializing MySQL
+├── docs/                           # Detailed business and technical documentation
+│   └── ETL_BUSINESS_LOGIC.md       # Technical explanation of the ETL logic & Medallion layers
+├── scripts_final/                  # Core PySpark ETL and MLOps scripts
+│   ├── extract_mysql_to_hdfs.py    # Job 1: Ingest MySQL raw data into HDFS (Bronze layer)
+│   ├── hospital_staging_job.py     # Job 2: Cleanse, map schemas, and output to HDFS (Silver layer)
+│   ├── hospital_dimension_job.py   # Job 3: Generate Dimension Tables with Surrogate Keys (Gold layer)
+│   ├── hospital_fact_job.py        # Job 4: Create Fact Tables and isolate dirty data (Gold layer)
+│   ├── load_hdfs_to_clickhouse_dw.py # Job 5: Load Gold tables into ClickHouse Data Warehouse via JDBC
+│   ├── train_forecast_models.py    # Job 6 (MLOps): Train SARIMA time-series models for revenue & user forecasting
+│   └── hospital_utils.py           # Shared helper functions (SparkSession setup, read/write utilities)
+├── shell/                          # Bash scripts used by Airflow to submit Spark jobs
+│   └── hospital_etl_airflow.sh     # Spark job submission and orchestration helper
+├── sql tạo bảng/                   # SQL dump files for ClickHouse schemas and structures
+├── Dockerfile.airflow              # Customized Airflow Docker image pre-configured with Docker CLI
+├── docker-compose.yml              # Central compose file linking all subsystem compose files using 'include'
+├── docker-compose.data.yml         # Compose configuration for databases (MySQL, ClickHouse)
+├── docker-compose.hdfs.yml         # Compose configuration for the HDFS cluster (NameNode, DataNode)
+├── docker-compose.spark.yml        # Compose configuration for Apache Spark (Master, Worker)
+├── docker-compose.airflow.yml      # Compose configuration for Apache Airflow (Webserver, Scheduler, Postgres backend)
+├── docker-compose.mlops.yml        # Compose configuration for MLflow tracking server
+├── clickhouse_schema.sql           # Schema definition script for ClickHouse tables
+└── requirements.txt                # Python libraries required for Spark and local tasks
 ```
 
 ---
 
-## 🛠 Yêu cầu hệ thống (Requirements)
-*   **Docker** & **Docker Compose** (Dùng để dựng môi trường Cluster).
-*   **Môi trường mạng** ổn định có thể kết nối tới máy chủ ClickHouse Cloud.
-*   Môi trường mạng có thể kết nối tới ClickHouse Cloud (hoặc tự cấu hình ClickHouse local).
+## 🛠 System Requirements
+*   **Docker** & **Docker Compose** (V2.20+ is recommended as the architecture uses the compose `include` feature).
+*   Stable network connection (especially if connecting to ClickHouse Cloud; otherwise, a local ClickHouse container is automatically spun up).
 
 ---
 
-## 🚀 Hướng dẫn Cài đặt & Chạy dự án
+## 🚀 Setup & Execution Guide
 
-### Bước 1: Khởi động hệ thống (Build & Run)
-Toàn bộ hạ tầng (HDFS NameNode/DataNode, Spark Master/Worker, Airflow Webserver/Scheduler, MySQL, Postgres) đã được đóng gói bằng Docker Compose.
+### Step 1: Spin up the Infrastructure
+The entire big data infrastructure (HDFS, Apache Spark, Airflow, MLflow, MySQL, Postgres, ClickHouse) is fully containerized.
 
-Mở Terminal tại thư mục `Hospital_ETL` và chạy:
+From the root directory of the project (`Hospital_ETL`), execute the following command in your terminal:
 ```bash
 docker compose up --build -d
 ```
-*Lưu ý:* Cờ `--build` ở lần đầu tiên sẽ giúp Docker tự động đọc file `Dockerfile.airflow` để cài sẵn Docker CLI vào Airflow, giúp giao diện UI bật lên siêu nhanh (dưới 5s ở những lần chạy sau).
+*Note:* The `--build` flag builds the customized Airflow image (using `Dockerfile.airflow`) containing the Docker CLI. This allows Airflow to manage Spark jobs seamlessly. Subsequent runs will start up in under 5 seconds.
 
-### Bước 2: Khởi tạo Dữ liệu Nguồn (Source Data)
-Dữ liệu mẫu từ thư mục `datasource/` (các file `.sql`) sẽ được hệ thống **tự động nạp** vào cơ sở dữ liệu MySQL ngay trong lần đầu chạy Docker. Không cần thực hiện thêm thao tác thủ công nào để tạo dữ liệu nguồn.
+### Step 2: Source Data Auto-Initialization
+When the MySQL container starts up for the first time, it automatically reads the SQL dumps inside the `./datasource` directory and populates the source database (`hospital_source`). You do not need to execute any manual scripts to load the initial sample data.
 
-*(Lưu ý: Cơ chế tự động nạp chỉ diễn ra một lần khi volume `mysql_data` trống. Nếu muốn xóa dữ liệu hiện tại và nạp lại từ đầu, hãy chạy lệnh `docker compose down -v` để xóa volume trước khi khởi động lại).*
+*(Note: If you ever want to reset the databases to their initial clean state, run `docker compose down -v` to delete the persisted Docker volumes, and then start the infrastructure up again).*
 
-### Bước 3: Theo dõi và Chạy luồng ETL qua Airflow
-1. Mở trình duyệt, truy cập vào giao diện Airflow:
-   👉 **http://localhost:8082**
-2. Đăng nhập với tài khoản:
-   - **Username:** `admin`
-   - **Password:** `admin`
-3. Tại giao diện chính, bật On cho DAG có tên `hospital_etl_dag`.
-4. Bấm nút Play (Trigger DAG) để kích hoạt luồng chạy. Tiến trình sẽ lần lượt đi qua các task:
+### Step 3: Run and Monitor the Pipeline via Airflow
+1. Open your web browser and navigate to the Airflow Web UI:
+   👉 **[http://localhost:8082](http://localhost:8082)**
+2. Log in using the default administrator credentials:
+   *   **Username:** `admin`
+   *   **Password:** `admin`
+3. Locate the DAG named `hospital_etl_dag` and toggle the switch to **On**.
+4. Click the **Play** button (Trigger DAG) to run the pipeline.
+5. Airflow will execute the tasks sequentially:
    `extract_mysql_to_hdfs` ➔ `build_staging` ➔ `build_dimensions` ➔ `build_facts` ➔ `load_hdfs_to_clickhouse_dw` ➔ `train_ml_forecast_models`.
-5. *Quản lý Model qua MLflow:* Sau khi Job cuối cùng chạy xong, truy cập **http://localhost:5000** để xem metrics (MAE, RMSE) và Schema mô hình dự báo.
-6. *Quản lý file trên HDFS:* Xem trực tiếp dữ liệu thô và sạch tại HDFS Web UI: **http://localhost:9870**.
 
 ---
 
-## ⚙️ Cấu hình (Configuration)
-Tất cả các tham số kết nối hệ thống (Database password, ClickHouse cloud connection, thư mục HDFS) được quy định trong:
-1. File `.env` (Nếu có).
-2. Mã nguồn trong file `hospital_utils.py` và đầu vào của file `load_hdfs_to_clickhouse_dw.py` (Cấu hình ClickHouse).
-Nếu muốn thay đổi thông tin kết nối ClickHouse, hãy chỉnh sửa biến môi trường (Environment variables) như `CLICKHOUSE_HOST`, `CLICKHOUSE_PORT`, `CLICKHOUSE_USER`, v.v.
+## 🖥 Service Web Interfaces (Web UIs)
+
+Once the infrastructure is up, you can access and monitor various components at these ports:
+
+| Service | Port | Web UI URL | Description |
+| :--- | :--- | :--- | :--- |
+| **Apache Airflow** | `8082` | **[http://localhost:8082](http://localhost:8082)** | Orchestrates and schedules the ETL DAG runs (admin/admin). |
+| **MLflow Server** | `5000` | **[http://localhost:5000](http://localhost:5000)** | Tracks model runs, metrics (MAE, RMSE), plots, and stores the champion forecasting model. |
+| **HDFS NameNode** | `9870` | **[http://localhost:9870](http://localhost:9870)** | Explores Bronze, Silver, Gold, and Quarantine layers in the Hadoop Distributed File System. |
+| **Spark Master** | `8083` | **[http://localhost:8083](http://localhost:8083)** | Monitors active Spark applications, executors, and processing logs. |
+| **Spark Worker** | `8081` | **[http://localhost:8081](http://localhost:8081)** | Spark worker dashboard monitoring resources and executors allocation. |
+| **ClickHouse HTTP** | `8123` | **[http://localhost:8123](http://localhost:8123)** | Port for HTTP queries, API connections (clickhouse-connect), and third-party dashboard integrations. |
+
+---
+
+## ⚙️ Configuration
+System configurations and connection parameters are managed dynamically.
+
+1. **Environment Variables (`.env`):**
+   Create a `.env` file in the root directory to customize database credentials, hostnames, and ports. If not provided, fallback parameters defined in individual compose files and `hospital_utils.py` will be used:
+   - `MYSQL_ROOT_PASSWORD` (Default: `rootpassword`)
+   - `CLICKHOUSE_HOST` (Default: `clickhouse` - internal Docker container name, or a ClickHouse Cloud host)
+   - `CLICKHOUSE_PORT` (Default: `8123`)
+   - `CLICKHOUSE_USER` (Default: `default`)
+   - `CLICKHOUSE_PASSWORD` (Default: `""`)
+   - `MLFLOW_TRACKING_URI` (Default: `http://mlflow-server:5000`)
+
+2. **ClickHouse Connections (`hospital_utils.py`):**
+   The JDBC and HTTP URL connections are resolved programmatically in `hospital_utils.py` using host environment settings, allowing the same codebase to run in both Docker-isolated networks and external cloud environments.

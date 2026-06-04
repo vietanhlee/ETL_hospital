@@ -1,76 +1,113 @@
-# Tài liệu Nghiệp vụ ETL (ETL Business Logic)
+# ETL Business Logic and Technical Architecture
 
-Dự án Hospital ETL áp dụng kiến trúc **Medallion Architecture** (Bronze ➔ Silver ➔ Gold) kết hợp với mô hình **Star Schema** dành cho Data Warehouse để phục vụ báo cáo BI (Business Intelligence). Dưới đây là mô tả chi tiết quy trình luân chuyển và xử lý dữ liệu qua từng bước (Jobs).
+The Hospital ETL project implements a modern **Medallion Architecture** (Bronze ➔ Silver ➔ Gold) coupled with a **Star Schema** data warehouse model to support downstream BI (Business Intelligence) reporting and advanced predictive analytics. 
+
+This document provides a comprehensive technical overview of the data lifecycle, schema design, cleansing rules, and analytical stages.
 
 ---
 
-## Tổng quan Kiến trúc
+## Technical Architecture Overview
 
 ```mermaid
-graph LR
-    A[MySQL Source] -->|Extract Job| B(HDFS Bronze Layer)
-    B -->|Staging Job| C(HDFS Silver Layer)
-    C -->|Dimension Job| D(HDFS Gold Layer: Dims)
-    C -->|Fact Job| E(HDFS Gold Layer: Facts)
-    D -->|Load Job| F[(ClickHouse DW)]
-    E -->|Load Job| F
-    F -->|MLOps Job| G((MLflow Registry))
+graph TD
+    A[MySQL Source Database] -->|1. Extract Job| B(HDFS Bronze Layer: Raw Parquet)
+    B -->|2. Staging Job| C(HDFS Silver Layer: Cleaned Parquet)
+    C -->|3. Dimension Job| D(HDFS Gold Layer: Dimensions)
+    C -->|4. Fact Job| E(HDFS Gold Layer: Facts)
+    
+    %% Quarantine Flow %%
+    B -.->|Invalid Records| Q1[(HDFS Quarantine)]
+    C -.->|Orphan Records| Q2[(HDFS Gold Quarantine)]
+    
+    D -->|5. Load Job| F[(ClickHouse Data Warehouse)]
+    E -->|5. Load Job| F
+    
+    F -->|6. MLOps Job| G((MLflow Model Registry))
+    G -->|Model Metrics & Champion Alias| H[Forecasting Reports]
 ```
 
-Quá trình chia làm 5 Job Spark tách biệt, được điều phối tuần tự qua Airflow.
+The pipeline is split into **6 isolated Spark/Python jobs**, scheduled and orchestrated sequentially via Apache Airflow.
 
 ---
 
-## Chi tiết từng tiến trình (ETL Jobs)
+## ETL Processing Layers & Jobs
 
-### 1. Job Extract (Raw Data Ingestion)
-**Script:** `extract_mysql_to_hdfs.py`
-- **Nhiệm vụ:** Đọc toàn bộ các bảng dữ liệu hoạt động (OLTP) từ MySQL và ghi thẳng xuống HDFS dưới định dạng Parquet (Tầng Bronze).
-- **Nghiệp vụ:** 
-  - Đóng vai trò là "Data Lake / Raw Storage". Không có bất kỳ thay đổi nào về cấu trúc hoặc giá trị dữ liệu ở tầng này để đảm bảo có thể trace-back (truy vết) lại nguồn gốc dữ liệu ban đầu nếu hệ thống xảy ra lỗi.
-  - Phân vùng dữ liệu (Partitioning) theo `run_date` trên HDFS để dễ dàng quản lý theo ngày.
+### 1. Extract Job (Raw Data Ingestion)
+*   **Script:** [extract_mysql_to_hdfs.py](file:///f:/Hospital_ETL/scripts_final/extract_mysql_to_hdfs.py)
+*   **Source:** MySQL OLTP Database (`hospital_source`)
+*   **Destination:** HDFS Bronze Layer (`/hospital_etl/bronze/run_date={run_date}`)
+*   **Business Logic & Rules:**
+    *   Acts as the **Raw Storage / Landing Zone**.
+    *   Extracts 9 tables representing hospital entities: `patients`, `doctors`, `departments`, `services`, `medicines`, `insurance`, `visits`, `service_transactions`, and `prescriptions`.
+    *   No structural changes or data transformations are applied at this stage. This preserves full lineage and allows auditability/reprocessing from raw data in the event of pipeline failures.
+    *   Data is written in compressed Parquet format and partitioned by execution day (`run_date`) for query optimization.
 
-### 2. Job Staging (Làm sạch & Chuẩn hóa dữ liệu)
-**Script:** `hospital_staging_job.py`
-- **Nhiệm vụ:** Đọc dữ liệu từ tầng Bronze, làm sạch, đổi tên cột (Aliasing) và ghi ra tầng Silver.
-- **Nghiệp vụ:**
-  - **Đồng nhất tên cột (Column Aliasing):** Do nguồn dữ liệu ban đầu thường lộn xộn (ví dụ: `p_id`, `patient_no`, `PatientCode` đều chỉ chung một thứ), luồng này sẽ dùng dictionary map lại toàn bộ để có tên cột chuẩn, dùng ngôn ngữ tiếng Anh và quy tắc CamelCase.
-  - **Ép kiểu & Parse Date:** Xử lý các cột DateTime dưới dạng String lộn xộn thành kiểu `TIMESTAMP` hoặc `DATE` chuẩn.
-  - **Làm sạch (Data Cleansing):** 
-    - Lọc bỏ các dòng Rác, Thiếu Key (ví dụ Bệnh nhân không có mã PatientCode).
-    - Tính toán thêm một số Field phái sinh (Derived fields) cơ bản: Tính `WaitingMinutes` (Thời gian chờ = Start Consultation - Checkin Time).
-  - Dữ liệu hoàn thiện được lưu bằng định dạng Parquet siêu nhẹ, sẵn sàng cho việc Join dữ liệu.
+### 2. Staging Job (Data Cleansing & Standardization)
+*   **Script:** [hospital_staging_job.py](file:///f:/Hospital_ETL/scripts_final/hospital_staging_job.py)
+*   **Source:** HDFS Bronze Layer
+*   **Destination:** HDFS Silver Layer (`/hospital_etl/silver/run_date={run_date}`)
+*   **Business Logic & Rules:**
+    *   **Flexible Column Mapping:** Maps source columns that contain symbols, spaces, or casing issues (e.g., `PatientId`, `PatientCode`, `PatientNo`) to standardized English camel-case schemas (`PatientCode`, `FullName`, `Gender`, etc.) using regex normalization.
+    *   **Master Data Cleansing:**
+        *   *Gender:* Standardized into `Nam` (Male), `Nữ` (Female), `Khác` (Other), or `Không xác định` (Unknown).
+        *   *BirthYear & AgeGroup:* Birth years are validated between 1900 and the current year. If valid, patients are assigned to age brackets: `0-17`, `18-35`, `36-55`, or `56+`.
+        *   *City:* Text entries are standardized to major Vietnamese cities (e.g. `Hà Nội`, `TP. Hồ Chí Minh`, `Đà Nẵng`) to fix typographical variations.
+        *   *Specialty & Academic Title:* Cleanses hospital-specific titles (e.g., mapping `bs` ➔ `BS`, `thac si` ➔ `ThS`) and specialty strings.
+        *   *Insurance & Coverage Rate:* Standardizes coverage percentages (0 to 100) and formats description labels (e.g., `BHYT 80%` or `Tự chi trả` if coverage rate is 0).
+    *   **Financial Curing:** Cleanse financial strings containing currency notations (like `VND`, commas, or spaces) and convert them to SQL `DECIMAL(18,2)`.
+    *   **Derived Columns:** Calculates `WaitingMinutes` as the elapsed time in minutes between check-in and the beginning of the consultation (`ConsultationStartTime - CheckinTime`).
+    *   **Quarantine Partitioning:** Invalid records (e.g., records missing primary keys like `PatientCode`, visits that are not marked as `COMPLETED`, transactions with quantities $\le 0$ or unit prices $\le 0$, or unpaid transactions) are filtered out and written to `/hospital_etl/quarantine/` on HDFS for monitoring.
+    *   Cleansed data is written as Parquet ready for dimension/fact generation.
 
-### 3. Job Dimension (Xây dựng Bảng Danh mục)
-**Script:** `hospital_dimension_job.py`
-- **Nhiệm vụ:** Trích xuất các thực thể (Entity) từ tầng Silver để tạo thành các bảng Dimension (Dim) độc lập. 
-- **Nghiệp vụ:**
-  - **Xóa trùng lặp (Deduplication):** Sử dụng hàm Window (`ROW_NUMBER() OVER (PARTITION BY Code ORDER BY updated_at DESC)`) để chỉ lấy dòng mới nhất (Latest State) của mỗi một đối tượng (Bác sĩ, Dịch vụ, Khoa phòng...). Điều này tương đương cấu hình SCD Type 1 (Ghi đè bản ghi cũ).
-  - **Sinh khóa nhân tạo (Surrogate Key):** Rất quan trọng trong Data Warehouse. Sử dụng `monotonically_increasing_id()` phân tán cực nhanh của Spark để gán ID đại diện (kiểu số Integer) cho từng đối tượng thay vì dùng mã chuỗi ký tự String, giúp việc truy vấn trên ClickHouse tăng tốc gấp bội.
-  - Các bảng sinh ra: `Dim_Patient`, `Dim_Doctor`, `Dim_Service`, `Dim_Medicine`, `Dim_Department`, `Dim_Insurance`, `Dim_Date`.
+### 3. Dimension Job (SCD Type 1 & Surrogate Key Generation)
+*   **Script:** [hospital_dimension_job.py](file:///f:/Hospital_ETL/scripts_final/hospital_dimension_job.py)
+*   **Source:** HDFS Silver Layer
+*   **Destination:** HDFS Gold Layer (`/hospital_etl/gold/run_date={run_date}/Dim_*`)
+*   **Business Logic & Rules:**
+    *   **Deduplication (SCD Type 1):** Applies windowing partitions (`ROW_NUMBER() OVER (PARTITION BY NaturalKey ORDER BY updated_at DESC, id DESC)`) to extract only the latest state of each master entity (Patients, Doctors, Services, Departments, Medicines, Insurance types). Historical updates overwrite previous entries (Slowly Changing Dimension Type 1).
+    *   **Surrogate Keys (SK):** Generates numerical identifiers using PySpark's distributed `monotonically_increasing_id()` function. Replacing string codes with integer SK keys significantly speeds up joins and aggregation speeds in ClickHouse.
+    *   **Automated Date Dimension (`Dim_Date`):** Collects all transaction dates from staging tables, dedupes them, and extracts calendar properties like: `DateKey` (YYYYMMDD integer), `FullDate` (Date), `DayNumber`, `MonthNumber`, `MonthName` (e.g. "January"), `QuarterNumber`, `YearNumber`, `DayOfWeekNumber`, `DayOfWeekName` (e.g. "Monday"), and an `IsWeekend` flag.
 
-### 4. Job Fact (Xây dựng Bảng Sự kiện & Xử lý Chất lượng)
-**Script:** `hospital_fact_job.py`
-- **Nhiệm vụ:** Gắn Surrogate Keys vào các giao dịch phát sinh và tính toán Metrics (Doanh thu, Chi phí, Đếm số lượng).
-- **Nghiệp vụ:**
-  - Đọc dữ liệu giao dịch ở Silver (Visit, Prescription, Service Transaction) và **INNER JOIN** với các bảng Dim ở Gold để ánh xạ (Mapping) mã Natural Key sang Surrogate Key.
-  - **Tính toán tài chính (Business Metrics):**
-    - `InsurancePaidAmount` = Giá tiền x Số lượng x (Tỷ lệ chi trả / 100).
-    - `PatientPaidAmount` = Tổng tiền - Tiền bảo hiểm trả.
-  - **Quarantine (Cách ly dữ liệu bẩn):** Job sẽ chạy `LEFT JOIN` và tìm ra các trường hợp "Orphan Records" (Ví dụ: Một lượt khám gắn cho bác sĩ có mã `DOC099`, nhưng không tồn tại bác sĩ `DOC099` trong Dim_Doctor). Các bản ghi rác này bị cách ly ra thư mục `/quarantine/` trên HDFS để Data Engineer phân tích lỗi hệ thống nguồn. 
-  - Các bảng sinh ra: `Fact_Visit`, `Fact_ServiceRevenue`, `Fact_Prescription`.
+### 4. Fact Job (Surrogate Key Mapping & Referral Integrity)
+*   **Script:** [hospital_fact_job.py](file:///f:/Hospital_ETL/scripts_final/hospital_fact_job.py)
+*   **Source:** HDFS Silver Layer (Transactions) & HDFS Gold Layer (Dimensions)
+*   **Destination:** HDFS Gold Layer (`/hospital_etl/gold/run_date={run_date}/Fact_*`)
+*   **Business Logic & Rules:**
+    *   **SK Joining:** Joins staging transactional tables (`visits`, `service_transactions`, `prescriptions`) with Gold Dimension tables on their natural keys to map them into their corresponding integer surrogate keys (`PatientKey`, `DoctorKey`, `ServiceKey`, etc.).
+    *   **Referral Integrity (Orphan Record Identification):** Identifies transaction records containing codes that do not exist in the dimension catalog (e.g., a visit referring to a non-existent doctor code `DOC999`). These records are isolated to `/hospital_etl/quarantine/` under fact-specific labels (e.g. `fact_visit_missing_dimension`) for Data Quality audits.
+    *   **Financial Calculation:**
+        *   `InsurancePaidAmount` = Total Amount $\times$ (Insurance Coverage Rate / 100)
+        *   `PatientPaidAmount` = Total Amount $-$ Insurance Paid Amount
+    *   **Fact Output Tables:**
+        *   `Fact_Visit`: Captures consultation fees, waiting times, and visit counts (`VisitCount = 1`).
+        *   `Fact_ServiceRevenue`: Captures details of hospital services ordered, unit prices, total cost, insurance paid, and patient paid.
+        *   `Fact_Prescription`: Records medication prescriptions dispensed, quantity, cost, insurance paid, and patient paid.
 
-### 5. Job Load (Đẩy lên Data Warehouse)
-**Script:** `load_hdfs_to_clickhouse_dw.py`
-- **Nhiệm vụ:** Khởi tạo bảng bên ClickHouse và đẩy dữ liệu tầng Gold (Parquet) lên.
-- **Nghiệp vụ:**
-  - **Thiết kế Bảng (Schema Definition):** Khởi tạo trước các bảng ClickHouse thông qua HTTP API bằng cơ chế Table Engine `ReplacingMergeTree`.
-  - **Cơ chế Upsert (Incremental):** `ReplacingMergeTree` tự động dò quét và Ghi đè (Upsert) dữ liệu mới đè lên dữ liệu cũ dựa vào cấu hình `ORDER BY (Khóa chính)`. Tránh hiện tượng đúp số liệu nếu Job ETL lỡ bị chạy đè 2 lần một ngày, loại bỏ hoàn toàn cơ chế Truncate (Xóa trắng bảng) tốn kém.
-  - **Truyền dẫn dữ liệu:** Sử dụng JDBC Push Batch qua Spark để đẩy hàng triệu dòng dữ liệu lên hệ thống ClickHouse Cloud một cách ổn định, tự động parse chuẩn mọi loại Data Types nhờ thừa hưởng từ cấu trúc của Parquet file.
+### 5. Load Job (ClickHouse Data Warehouse Feeding)
+*   **Script:** [load_hdfs_to_clickhouse_dw.py](file:///f:/Hospital_ETL/scripts_final/load_hdfs_to_clickhouse_dw.py)
+*   **Source:** HDFS Gold Layer (Parquet format)
+*   **Destination:** ClickHouse Cloud/Local Data Warehouse (`hospital_dw` database)
+*   **Business Logic & Rules:**
+    *   **DDL Initializer:** Uses the ClickHouse HTTP API to issue `CREATE DATABASE` and `CREATE TABLE` commands. 
+    *   **ReplacingMergeTree Engine:** Every table in the warehouse is defined using ClickHouse's `ReplacingMergeTree` engine, ordered by its primary key (e.g. `VisitCode` for visits, `DateKey` for dates). This engine automatically handles duplicates during merges by overwriting older entries with the newest run date. This eliminates the need for expensive `TRUNCATE` operations and prevents double-counting if the ETL pipeline is run multiple times.
+    *   **JDBC Ingestion:** Reads Gold Parquet schemas and bulk-inserts them into ClickHouse tables in batches of **10,000** records to maximize ingestion throughput.
 
-### 6. Job MLOps (Dự báo doanh thu & số người dùng)
-**Script:** `train_forecast_models.py`
-- **Nhiệm vụ:** Lấy dữ liệu từ ClickHouse DW, huấn luyện mô hình dự báo chuỗi thời gian (SARIMA) và tự động quản lý version mô hình qua công cụ MLflow.
-- **Nghiệp vụ:**
-  - **Dự báo:** Lấy tổng doanh thu và số lượt khám (unique patients) từ bảng `fact_service_revenue` theo từng ngày. Chia tập Train/Test (30 ngày) và áp dụng mô hình SARIMA để dự báo 30 ngày tiếp theo.
-  - **CI/CD Mô hình (Model Registry):** Tính toán độ chính xác (MAE, RMSE) của mô hình vừa train. Tự động so sánh với mô hình "Champion" đang được lưu trữ trên MLflow Registry. Nếu mô hình mới tốt hơn (sai số nhỏ hơn), hệ thống sẽ tự động đăng ký mô hình, tạo Schema (Signature) tự động, gắn kèm Description nghiệp vụ, và đánh dấu mác (alias) `champion` cho phiên bản mới.
+### 6. MLOps Job (Predictive Analytics & Model CI/CD)
+*   **Script:** [train_forecast_models.py](file:///f:/Hospital_ETL/scripts_final/train_forecast_models.py)
+*   **Source:** ClickHouse Data Warehouse Tables
+*   **Infrastructure:** MLflow Tracking Server (`http://mlflow-server:5000`)
+*   **Business Logic & Rules:**
+    *   **Data Aggregation:** Retrieves historical daily service revenue and daily unique patient counts from `fact_service_revenue`.
+    *   **Parallel Execution:** Spins up a `ProcessPoolExecutor` to train two separate forecasting models concurrently:
+        1. **Revenue Forecast Model**
+        2. **User Count Forecast Model**
+    *   **Grid Search & Hyperparameter Tuning:**
+        *   Performs a grid search sweep across SARIMA orders: non-seasonal `(p, d, q)` and seasonal `(P, D, Q, s=7)` parameters.
+        *   Splits historical data into Train, Validation (15 days), and Test (15 days) sets.
+        *   Finds the configuration that yields the lowest **Validation MAE** (Mean Absolute Error).
+    *   **Model Re-fitting & Prediction:** Re-fits the model using the optimal parameters over the joint (Train + Validation) set, predicts the Test set, and forecasts 30 days into the future.
+    *   **MLflow Logging:** Logs tuning parameters, evaluation metrics (MAE, RMSE), time-series prediction plots, and the statsmodels model binary to the MLflow tracking registry.
+    *   **CI/CD Model Registry (Champion Deployment):**
+        *   Queries the MLflow registry for the active model version tagged as `champion`.
+        *   Evaluates the champion model's performance on the current test dataset and compares its MAE to the newly trained model's MAE.
+        *   If the new model has a **lower or equal MAE**, it is registered as a new model version and the `champion` alias is updated to point to it. If the old model performs better, the new model is logged to the experiment history but is not promoted.
